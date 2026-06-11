@@ -139,20 +139,55 @@ async function handler(req, res) {
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const conversation = [{ role: 'system', content: SYSTEM_PROMPT }, ...clean];
 
+  const createCompletion = (withTools, extraMessages = []) =>
+    groq.chat.completions.create({
+      model: GROQ_MODEL,
+      max_tokens: 2048,
+      temperature: 0.3,
+      messages: [...conversation, ...extraMessages],
+      ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
+    });
+
+  // Llama on Groq sometimes emits a malformed tool call and the API rejects
+  // it with 400 tool_use_failed. Retry once with tools, then fall back to a
+  // plain completion so the user still gets an answer instead of a 500.
+  const isToolUseFailed = (err) =>
+    err?.status === 400 &&
+    (err?.error?.error?.code === 'tool_use_failed' || String(err?.message || '').includes('tool_use_failed'));
+
   try {
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-      const completion = await groq.chat.completions.create({
-        model: GROQ_MODEL,
-        max_tokens: 2048,
-        temperature: 0.3,
-        messages: conversation,
-        tools: TOOLS,
-        tool_choice: 'auto',
-      });
+      let completion;
+      try {
+        completion = await createCompletion(true);
+      } catch (err) {
+        if (!isToolUseFailed(err)) throw err;
+        logSecurityEvent('GROQ_TOOL_USE_FAILED', req.user?.email || 'unknown', `round ${round}, retrying`);
+        try {
+          completion = await createCompletion(true);
+        } catch (retryErr) {
+          if (!isToolUseFailed(retryErr)) throw retryErr;
+          completion = await createCompletion(false, [{
+            role: 'system',
+            content: 'Vault tools are temporarily unavailable for this reply. Answer from your general knowledge, and do not claim to have searched or read any notes.',
+          }]);
+        }
+      }
 
       const message = completion.choices[0]?.message;
       if (!message) throw new Error('Empty completion from Groq');
       conversation.push(message);
+
+      // Llama occasionally writes a pseudo tool call as plain text instead
+      // of a real one ("<function=search_files...>"). Never show that to the
+      // user; tell the model to correct itself and run another round.
+      if (!message.tool_calls?.length && /<function[=\s]/.test(message.content || '') && round < MAX_TOOL_ROUNDS) {
+        conversation.push({
+          role: 'system',
+          content: 'Your previous reply contained a malformed tool call and nothing was executed. Either make a valid tool call, or answer the user in plain prose without pretending to search.',
+        });
+        continue;
+      }
 
       if (!message.tool_calls?.length) {
         logSecurityEvent('QUERY_SUCCESS', req.user.email, `${round} tool round(s)`);
@@ -180,7 +215,16 @@ async function handler(req, res) {
         } catch {
           // Model produced malformed JSON; report it back as a tool error
         }
-        const result = await executeTool(toolCall.function.name, args);
+        // A failing vault call must not 500 the whole request: report the
+        // failure as the tool result so the model can tell the user what
+        // happened (vault empty, repo unreachable, file not found, ...).
+        let result;
+        try {
+          result = await executeTool(toolCall.function.name, args);
+        } catch (toolError) {
+          logSecurityEvent('TOOL_FAILED', req.user?.email || 'unknown', `${toolCall.function.name}: ${toolError.message}`);
+          result = `Error: the "${toolCall.function.name}" vault operation failed (${toolError.status === 404 ? 'not found' : 'vault unavailable'}). Tell the user briefly, and answer from your own knowledge if you can.`;
+        }
         conversation.push({
           role: 'tool',
           tool_call_id: toolCall.id,

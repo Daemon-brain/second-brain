@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import Head from 'next/head';
 import dynamic from 'next/dynamic';
+import Cropper from 'react-easy-crop';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph').then((mod) => mod.ForceGraph2D), {
   ssr: false,
@@ -27,11 +28,38 @@ const Icon = ({ children, size = 16 }) => (
   </svg>
 );
 
-const GlyphLeaf = ({ size = 18 }) => (
-  <Icon size={size}>
-    <path d="M13.5 2.5C8 2.5 3.5 5.5 3.5 11c0 1.5.4 2.5.4 2.5S5 13 6.5 13c5.5 0 7-4.5 7-10.5z" />
-    <path d="M3.9 13.5C6.5 10 9.5 7.5 12 6" />
-  </Icon>
+/* Filled brain mark, side profile facing left: cerebrum, cerebellum and
+   brain stem in currentColor, sulci carved with the page background so it
+   adapts to light/dark themes. */
+const GlyphBrain = ({ size = 18 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+    <g fill="currentColor">
+      {/* cerebrum */}
+      <circle cx="6.8" cy="6.8" r="2.5" />
+      <circle cx="11.5" cy="4.9" r="2.6" />
+      <circle cx="16" cy="6" r="2.4" />
+      <circle cx="19" cy="9" r="2.4" />
+      <circle cx="4.4" cy="10.2" r="2.3" />
+      <circle cx="5.6" cy="13.2" r="2.2" />
+      <circle cx="9" cy="14.6" r="2.2" />
+      <circle cx="11.5" cy="9.5" r="4.5" />
+      <circle cx="12.8" cy="12.5" r="3" />
+      <circle cx="18.6" cy="12.2" r="2" />
+      {/* cerebellum */}
+      <circle cx="17.2" cy="15.6" r="2.3" />
+      <circle cx="14.6" cy="16.2" r="1.6" />
+      {/* brain stem */}
+      <path d="M10.8 15l2.9.2-.4 3.2a1.3 1.3 0 0 1-2.6-.2z" />
+    </g>
+    <g style={{ stroke: 'var(--bg)' }} strokeWidth="1.3" strokeLinecap="round" fill="none">
+      <path d="M6.2 8.2c.9-.6 2-.4 2.6.4" />
+      <path d="M11 6.4c.8.7.9 1.8.2 2.6" />
+      <path d="M16.6 8.4c-.9-.3-1.9.1-2.3 1" />
+      <path d="M7.4 12.2c.8-.7 2-.7 2.7 0" />
+      <path d="M12.6 11.2c.9.3 1.4 1.2 1.2 2.1" />
+      <path d="M14.9 14.2l4.2 1" />
+    </g>
+  </svg>
 );
 const GlyphPlus = () => (
   <Icon>
@@ -107,10 +135,222 @@ const GlyphSend = () => (
   </Icon>
 );
 
+/* Cover Header Component */
+function CoverHeader({ cover, onEdit }) {
+  if (!cover) {
+    return null;
+  }
+
+  const imageUrl = typeof cover === 'string' ? cover : cover.url || cover;
+  const crop = cover.crop || { x: 0, y: 0, width: 1, height: 1 };
+
+  return (
+    <div className="cover-header">
+      <img
+        src={imageUrl}
+        alt="Cover"
+        className="cover-image"
+        style={{
+          objectPosition: `${crop.x * 100}% ${crop.y * 100}%`,
+          objectFit: 'cover',
+        }}
+      />
+      <div className="cover-actions">
+        <button onClick={onEdit} className="cover-action-btn" title="Edit cover">
+          ✎
+        </button>
+        <button
+          onClick={() => onEdit(true)}
+          className="cover-action-btn"
+          title="Replace cover"
+        >
+          ⟳
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* Cover Modal Component */
+function CoverModal({ isOpen, onClose, onSave, currentCover }) {
+  const [mode, setMode] = useState('source'); // 'source', 'crop'
+  const [imageSource, setImageSource] = useState('');
+  const [imageSrc, setImageSrc] = useState(currentCover || '');
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target?.result;
+      setImageSrc(dataUrl);
+      setMode('crop');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleUrlImport = () => {
+    if (!imageSource.trim()) return;
+    setImageSrc(imageSource);
+    setImageSource('');
+    setMode('crop');
+  };
+
+  const handleCropComplete = (croppedArea, croppedAreaPixels) => {
+    setCroppedAreaPixels(croppedAreaPixels);
+  };
+
+  const handleSave = () => {
+    if (mode === 'crop') {
+      const cropData = {
+        url: imageSrc,
+        crop: croppedAreaPixels
+          ? {
+              x: croppedAreaPixels.x / croppedAreaPixels.width,
+              y: croppedAreaPixels.y / croppedAreaPixels.height,
+              width: croppedAreaPixels.width,
+              height: croppedAreaPixels.height,
+            }
+          : { x: 0, y: 0, width: 1, height: 1 },
+      };
+      onSave(cropData);
+      resetForm();
+      onClose();
+    }
+  };
+
+  const handleRemove = () => {
+    onSave(null);
+    resetForm();
+    onClose();
+  };
+
+  const resetForm = () => {
+    setMode('source');
+    setImageSource('');
+    setImageSrc('');
+    setCrop({ x: 0, y: 0 });
+    setZoom(1);
+    setCroppedAreaPixels(null);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="cover-modal-overlay" onClick={onClose}>
+      <div className="cover-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="cover-modal-header">
+          <h2>Edit Cover</h2>
+          <button onClick={onClose} className="modal-close-btn">✕</button>
+        </div>
+
+        {mode === 'source' ? (
+          <div className="cover-modal-content">
+            <div className="cover-source-section">
+              <h3>Upload Image</h3>
+              <label className="file-input-label">
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/gif"
+                  onChange={handleFileUpload}
+                  className="file-input"
+                />
+                Click to upload or drag an image
+              </label>
+            </div>
+
+            <div className="cover-source-divider" />
+
+            <div className="cover-source-section">
+              <h3>Import from URL</h3>
+              <div className="url-section">
+                <input
+                  type="url"
+                  value={imageSource}
+                  onChange={(e) => setImageSource(e.target.value)}
+                  placeholder="https://example.com/image.jpg"
+                  className="url-input"
+                />
+                <button
+                  onClick={handleUrlImport}
+                  disabled={!imageSource.trim()}
+                  className="import-btn"
+                >
+                  Import
+                </button>
+              </div>
+            </div>
+
+            {currentCover && (
+              <div className="cover-source-section">
+                <button onClick={handleRemove} className="remove-btn">
+                  Remove Cover
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="cover-modal-content">
+            <div className="cropper-container">
+              <Cropper
+                image={imageSrc}
+                crop={crop}
+                zoom={zoom}
+                aspect={16 / 9}
+                cropShape="rect"
+                showGrid={false}
+                onCropChange={setCrop}
+                onCropComplete={handleCropComplete}
+                onZoomChange={setZoom}
+              />
+            </div>
+
+            <div className="cropper-controls">
+              <div className="zoom-control">
+                <label>Zoom</label>
+                <input
+                  type="range"
+                  min="1"
+                  max="3"
+                  step="0.1"
+                  value={zoom}
+                  onChange={(e) => setZoom(parseFloat(e.target.value))}
+                  className="zoom-slider"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="cover-modal-footer">
+          {mode === 'crop' && (
+            <button onClick={() => setMode('source')} className="modal-btn modal-btn-secondary">
+              Change Source
+            </button>
+          )}
+          <button onClick={onClose} className="modal-btn modal-btn-secondary">
+            Cancel
+          </button>
+          {mode === 'crop' && (
+            <button onClick={handleSave} className="modal-btn modal-btn-primary">
+              Save Cover
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   const [authenticated, setAuthenticated] = useState(false);
   const [email, setEmail] = useState('');
   const [accessToken, setAccessToken] = useState('');
+  const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState('');
 
   // Chat & sidebar state
@@ -123,6 +363,7 @@ export default function Home() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [graphLoading, setGraphLoading] = useState(false);
+  const [coverModalOpen, setCoverModalOpen] = useState(false);
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -189,6 +430,7 @@ export default function Home() {
       id: Date.now().toString(),
       title: 'New chat',
       messages: [],
+      cover: null, // { url, crop: { x, y, width, height } } or base64 data URL
     };
     setChats((prev) => [newChat, ...prev]);
     setCurrentChatId(newChat.id);
@@ -206,6 +448,14 @@ export default function Home() {
       }
     }
   }, [currentChatId, chats, createNewChat]);
+
+  const updateCover = useCallback((coverData) => {
+    setChats((prev) =>
+      prev.map((chat) =>
+        chat.id === currentChatId ? { ...chat, cover: coverData } : chat
+      )
+    );
+  }, [currentChatId]);
 
   const updateChatMessages = useCallback((newMessages) => {
     setChats((prev) =>
@@ -243,7 +493,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email: loginEmail }),
+        body: JSON.stringify({ email: loginEmail, accessKey: password }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -323,7 +573,7 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>Second Brain</title>
+        <title>Daemon</title>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="robots" content="noindex, nofollow" />
       </Head>
@@ -332,8 +582,8 @@ export default function Home() {
         <main className="login-page">
           <div className="login-card">
             <div className="wordmark">
-              <GlyphLeaf size={22} />
-              <span>Second Brain</span>
+              <GlyphBrain size={22} />
+              <span>Daemon</span>
             </div>
             <h1>Your knowledge,<br />one question away.</h1>
             <form onSubmit={handleLogin}>
@@ -347,6 +597,15 @@ export default function Home() {
                 maxLength={254}
                 aria-label="Email address"
               />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+                required
+                maxLength={128}
+                aria-label="Password"
+              />
               <button type="submit">Continue</button>
             </form>
             {loginError && <p className="error" role="alert">{loginError}</p>}
@@ -358,12 +617,9 @@ export default function Home() {
           <aside className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
             <div className="sidebar-header">
               <div className="wordmark">
-                <GlyphLeaf />
-                <span>Second Brain</span>
+                <GlyphBrain size={26} />
+                <span>Daemon</span>
               </div>
-              <button className="icon-btn" onClick={() => setSidebarOpen(false)} aria-label="Close sidebar">
-                <GlyphClose />
-              </button>
             </div>
 
             <button className="new-chat-btn" onClick={createNewChat}>
@@ -442,12 +698,18 @@ export default function Home() {
             </button>
           )}
 
-          {/* Main Chat Area */}
+          {/* Main column: static header on top, scrollable chat below */}
+          <div className="main-column">
+          <div className="page-header">
+            <div className="page-header-inner">
+              <button onClick={() => setCoverModalOpen(true)} className="add-cover-btn">
+                <span>+ Add cover</span>
+              </button>
+            </div>
+          </div>
+
           <div className="chat-container">
-            <header className="topbar">
-              <span className="chat-title">{currentChat?.title || 'New chat'}</span>
-              <span className="session">{email}</span>
-            </header>
+            <CoverHeader cover={currentChat?.cover} onEdit={() => setCoverModalOpen(true)} />
 
             <div className="messages">
               <div className="messages-inner">
@@ -464,13 +726,13 @@ export default function Home() {
                 )}
                 {messages.map((msg, idx) => (
                   <div key={idx} className={`message ${msg.role}`}>
-                    {msg.role === 'assistant' && <div className="speaker">Second Brain</div>}
+                    {msg.role === 'assistant' && <div className="speaker">Daemon</div>}
                     <div className="message-content">{msg.content}</div>
                   </div>
                 ))}
                 {loading && (
                   <div className="message assistant">
-                    <div className="speaker">Second Brain</div>
+                    <div className="speaker">Daemon</div>
                     <div className="pulse" aria-label="Thinking">
                       <span /><span /><span />
                     </div>
@@ -497,6 +759,7 @@ export default function Home() {
                 </button>
               </form>
             </div>
+          </div>
           </div>
 
           {/* Graph Modal */}
@@ -530,6 +793,14 @@ export default function Home() {
               </div>
             </div>
           )}
+
+          {/* Cover Modal */}
+          <CoverModal
+            isOpen={coverModalOpen}
+            onClose={() => setCoverModalOpen(false)}
+            onSave={updateCover}
+            currentCover={currentChat?.cover}
+          />
         </main>
       )}
 
@@ -573,7 +844,9 @@ export default function Home() {
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        html, body, #__next { height: 100%; }
+        /* The app is viewport-locked: only .messages scrolls internally,
+           so the sidebar, header and composer always stay in view. */
+        html, body, #__next { height: 100%; overflow: hidden; }
         body {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
           font-size: 0.95rem;
@@ -625,7 +898,7 @@ export default function Home() {
         ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
       `}</style>
 
-      <style jsx>{`
+      <style jsx global>{`
         /* ------------------------------------------------------------ login */
         .login-page {
           height: 100%;
@@ -640,11 +913,11 @@ export default function Home() {
         .wordmark {
           display: flex;
           align-items: center;
-          gap: 0.5rem;
+          gap: 0.7rem;
           color: var(--accent);
-          font-weight: 600;
-          font-size: 0.9rem;
-          letter-spacing: 0.01em;
+          font-weight: 700;
+          font-size: 1.55rem;
+          letter-spacing: 0.02em;
         }
         .wordmark span { color: var(--fg-strong); }
         .login-card h1 {
@@ -669,24 +942,39 @@ export default function Home() {
         .error { color: var(--danger); margin-top: 1rem; font-size: 0.88rem; }
 
         /* ----------------------------------------------------------- layout */
-        .chat-page { height: 100%; display: flex; }
+        /* Viewport-locked app frame: sidebar | main-column. The frame never
+           scrolls; only .messages scrolls inside the main column. */
+        .chat-page {
+          height: 100%;
+          display: flex;
+          overflow: hidden;
+        }
+        .main-column {
+          flex: 1;
+          min-width: 0;
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+        }
 
         .sidebar {
           width: 264px;
           flex-shrink: 0;
+          height: 100%;
           border-right: 1px solid var(--border);
           padding: 1.1rem 0.85rem;
           display: flex;
           flex-direction: column;
           gap: 1.4rem;
           overflow-y: auto;
-          transition: transform 0.2s ease;
+          z-index: 400;
+          background: var(--bg);
         }
         .sidebar.closed { display: none; }
 
         .sidebar-header {
           display: flex;
-          justify-content: space-between;
+          justify-content: center;
           align-items: center;
           padding: 0 0.4rem;
         }
@@ -775,12 +1063,13 @@ export default function Home() {
         .chat-item.active .chat-btn { color: var(--accent-dark); font-weight: 500; }
 
         .sidebar-footer {
-          margin-top: auto;
-          padding-top: 0.9rem;
+          margin-top: 7.5rem;
+          padding: 0.9rem 0 1.5rem;
           border-top: 1px solid var(--border);
           display: flex;
           flex-direction: column;
           gap: 2px;
+          flex-shrink: 0;
         }
         .signout:hover { color: var(--danger); }
         .signout:hover :global(svg) { color: var(--danger); }
@@ -799,31 +1088,18 @@ export default function Home() {
         .chat-container {
           flex: 1;
           min-width: 0;
+          min-height: 0;
           display: flex;
           flex-direction: column;
         }
 
-        .topbar {
-          display: flex;
-          align-items: baseline;
-          justify-content: space-between;
-          gap: 1rem;
-          padding: 0.9rem 1.75rem;
-          border-bottom: 1px solid var(--border);
-        }
-        .chat-title {
-          font-size: 0.9rem;
-          font-weight: 500;
-          color: var(--fg-strong);
-          white-space: nowrap;
-          overflow: hidden;
-          text-overflow: ellipsis;
-        }
-        .session { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
-
-        .messages { flex: 1; overflow-y: auto; }
+        .messages { flex: 1; min-height: 0; overflow-y: auto; }
+        /* Shared chat column: .messages-inner and .composer must keep
+           identical width, max-width, and side padding so messages and
+           the input bar align on the same left edge. */
         .messages-inner {
-          max-width: 720px;
+          width: 100%;
+          max-width: 1080px;
           margin: 0 auto;
           padding: 2rem 1.5rem 1rem;
           display: flex;
@@ -831,7 +1107,7 @@ export default function Home() {
           gap: 1.6rem;
         }
 
-        .empty-state { margin-top: 18vh; }
+        .empty-state { margin-top: 0; }
         .empty-state h2 { font-size: 1.6rem; }
         .empty-state p { color: var(--muted); margin-top: 0.4rem; }
         .suggestions {
@@ -889,10 +1165,14 @@ export default function Home() {
         }
 
         /* --------------------------------------------------------- composer */
-        .composer { padding: 0.75rem 1.5rem 1.4rem; }
-        .input-shell {
-          max-width: 720px;
+        .composer {
+          width: 100%;
+          max-width: 1080px;
           margin: 0 auto;
+          padding: 0.75rem 1.5rem 1.4rem;
+          flex-shrink: 0;
+        }
+        .input-shell {
           display: flex;
           align-items: center;
           gap: 0.5rem;
@@ -963,6 +1243,438 @@ export default function Home() {
         .graph-empty { color: var(--muted); padding: 2rem; text-align: center; }
         :global(.graph-loading) { color: var(--muted); }
 
+        /* ----------------------------------------------------------- header */
+        .page-header {
+          position: sticky;
+          top: 0;
+          height: 60px;
+          flex-shrink: 0;
+          background: var(--bg);
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          align-items: center;
+          z-index: 500;
+        }
+        /* Same column metrics as .composer so the button's right edge
+           lines up with the input bar's right edge. */
+        .page-header-inner {
+          width: 100%;
+          max-width: 1080px;
+          margin: 0 auto;
+          padding: 0 1.5rem;
+          display: flex;
+          justify-content: flex-end;
+        }
+
+        .header-brand {
+          display: flex;
+          align-items: center;
+          gap: 0.75rem;
+          font-weight: 600;
+          font-size: 1rem;
+          color: var(--fg-strong);
+          letter-spacing: 0.02em;
+        }
+        .header-brand :global(svg) {
+          color: var(--accent);
+        }
+
+        .add-cover-btn {
+          padding: 0.65rem 1.25rem;
+          background: var(--bg-secondary);
+          color: var(--fg);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.9rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          letter-spacing: 0.02em;
+        }
+        .add-cover-btn:hover {
+          background: var(--border);
+          border-color: var(--border-strong);
+          color: var(--accent);
+        }
+
+        /* ----------------------------------------------------------- cover */
+
+        .cover-placeholder {
+          width: 100%;
+          height: 240px;
+          background: linear-gradient(135deg, var(--border) 0%, var(--border-strong) 100%);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          position: relative;
+          overflow: hidden;
+        }
+        .cover-add-btn {
+          background: rgba(255, 255, 255, 0.15);
+          color: var(--muted);
+          border: 1px solid var(--border-strong);
+          padding: 0.75rem 1.5rem;
+          border-radius: 8px;
+          font-size: 0.95rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .cover-add-btn:hover {
+          background: rgba(255, 255, 255, 0.25);
+          color: var(--fg);
+        }
+
+        .cover-header {
+          width: 100%;
+          height: 240px;
+          flex-shrink: 0;
+          position: relative;
+          overflow: hidden;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: var(--bg-secondary);
+        }
+        .cover-image {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+        .cover-actions {
+          position: absolute;
+          top: 1rem;
+          right: 1rem;
+          display: flex;
+          gap: 0.5rem;
+          opacity: 0;
+          transition: opacity 0.2s ease;
+        }
+        .cover-header:hover .cover-actions {
+          opacity: 1;
+        }
+        .cover-action-btn {
+          background: rgba(0, 0, 0, 0.4);
+          color: white;
+          border: none;
+          width: 36px;
+          height: 36px;
+          border-radius: 6px;
+          cursor: pointer;
+          font-size: 1.1rem;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: background 0.2s ease;
+        }
+        .cover-action-btn:hover {
+          background: rgba(0, 0, 0, 0.6);
+        }
+
+        /* Cover popup: anchored under the "+ Add cover" button in the header */
+        .cover-modal-overlay {
+          position: fixed;
+          inset: 0;
+          background: transparent;
+          z-index: 2000;
+        }
+        .cover-modal {
+          position: fixed;
+          top: 68px;
+          /* Align right edge with the header button / input bar column */
+          right: calc(max(0px, (100vw - 264px - 1080px) / 2) + 1.5rem);
+          width: 440px;
+          max-width: calc(100vw - 264px - 3rem);
+          max-height: calc(100vh - 84px);
+          overflow-y: auto;
+          background: var(--bg);
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18);
+          display: flex;
+          flex-direction: column;
+          transform-origin: top right;
+          animation: cover-pop 0.16s ease;
+        }
+        @keyframes cover-pop {
+          from { opacity: 0; transform: scale(0.96) translateY(-6px); }
+          to { opacity: 1; transform: scale(1) translateY(0); }
+        }
+        .cover-modal-header {
+          padding: 1rem 1.25rem;
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          flex-shrink: 0;
+        }
+        .cover-modal-header h2 {
+          margin: 0;
+          font-size: 1.05rem;
+          color: var(--fg);
+        }
+        .modal-close-btn {
+          background: none;
+          border: none;
+          font-size: 1.5rem;
+          cursor: pointer;
+          color: var(--muted);
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .modal-close-btn:hover {
+          color: var(--fg);
+        }
+
+        .cover-modal-content {
+          padding: 1.25rem;
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          gap: 1.5rem;
+        }
+        .cover-source-section {
+          display: flex;
+          flex-direction: column;
+          gap: 1.25rem;
+        }
+        .cover-source-section h3 {
+          margin: 0;
+          font-size: 1rem;
+          font-weight: 600;
+          color: var(--fg);
+          letter-spacing: 0.02em;
+        }
+
+        .file-input {
+          display: none;
+        }
+        .file-input-wrapper {
+          display: inline-block;
+        }
+        .file-input-label {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 1.5rem 1.25rem;
+          border: 2px dashed var(--border-strong);
+          border-radius: 10px;
+          background: linear-gradient(135deg, var(--bg-secondary) 0%, rgba(27, 138, 111, 0.02) 100%);
+          cursor: pointer;
+          font-weight: 500;
+          color: var(--fg);
+          transition: all 0.25s ease;
+          width: 100%;
+          box-sizing: border-box;
+        }
+        .file-input-label:hover {
+          border-color: var(--accent);
+          background: linear-gradient(135deg, rgba(27, 138, 111, 0.05) 0%, rgba(27, 138, 111, 0.02) 100%);
+          color: var(--accent);
+        }
+
+        .url-section {
+          display: flex;
+          gap: 0.75rem;
+          align-items: flex-end;
+        }
+        .url-input {
+          flex: 1;
+          padding: 0.85rem 1rem;
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          font-size: 0.95rem;
+          background: var(--bg-secondary);
+          color: var(--fg);
+          font-family: inherit;
+          transition: all 0.2s ease;
+        }
+        .url-input::placeholder {
+          color: var(--muted);
+        }
+        .url-input:focus {
+          outline: none;
+          border-color: var(--accent);
+          box-shadow: 0 0 0 3px rgba(27, 138, 111, 0.1);
+        }
+
+        .import-btn {
+          padding: 0.85rem 1.75rem;
+          background: var(--accent);
+          color: white;
+          border: none;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.95rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          white-space: nowrap;
+          letter-spacing: 0.02em;
+        }
+        .import-btn:hover:not(:disabled) {
+          background: #157056;
+          transform: translateY(-1px);
+          box-shadow: 0 2px 8px rgba(27, 138, 111, 0.3);
+        }
+        .import-btn:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+
+        .cover-source-divider {
+          text-align: center;
+          color: var(--muted);
+          font-size: 0.95rem;
+          font-weight: 500;
+          position: relative;
+          margin: 0.5rem 0;
+        }
+        .cover-source-divider::before {
+          content: '';
+          position: absolute;
+          left: 0;
+          top: 50%;
+          width: 100%;
+          height: 1px;
+          background: var(--border);
+          z-index: -1;
+        }
+        .cover-source-divider::after {
+          content: 'or';
+          position: relative;
+          background: var(--bg);
+          padding: 0 1rem;
+        }
+
+        .remove-btn {
+          padding: 0.85rem 1.5rem;
+          background: rgba(220, 74, 56, 0.08);
+          color: var(--danger);
+          border: 1px solid rgba(220, 74, 56, 0.3);
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.95rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          width: 100%;
+          letter-spacing: 0.02em;
+        }
+        .remove-btn:hover {
+          background: rgba(220, 74, 56, 0.15);
+          border-color: var(--danger);
+        }
+
+        .cropper-container {
+          position: relative;
+          width: 100%;
+          height: 260px;
+          background: var(--bg-secondary);
+          border-radius: 8px;
+          overflow: hidden;
+        }
+        :global(.reactEasyCrop_Container) {
+          background: var(--bg-secondary) !important;
+        }
+        :global(.reactEasyCrop_Image) {
+          max-width: none;
+        }
+
+        .cropper-controls {
+          padding: 1rem 1.25rem;
+          border-top: 1px solid var(--border);
+          background: var(--bg-secondary);
+        }
+        .zoom-control {
+          display: flex;
+          align-items: center;
+          gap: 1.5rem;
+        }
+        .zoom-control label {
+          font-size: 0.95rem;
+          font-weight: 600;
+          color: var(--fg);
+          min-width: 50px;
+          letter-spacing: 0.02em;
+        }
+        .zoom-slider {
+          flex: 1;
+          height: 6px;
+          cursor: pointer;
+          -webkit-appearance: none;
+          appearance: none;
+          background: var(--border);
+          border-radius: 4px;
+          border: none;
+        }
+        .zoom-slider::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          background: var(--accent);
+          cursor: pointer;
+          box-shadow: 0 2px 6px rgba(27, 138, 111, 0.3);
+          transition: all 0.2s ease;
+        }
+        .zoom-slider::-webkit-slider-thumb:hover {
+          background: #157056;
+          box-shadow: 0 2px 8px rgba(27, 138, 111, 0.4);
+        }
+        .zoom-slider::-moz-range-thumb {
+          width: 18px;
+          height: 18px;
+          border-radius: 50%;
+          background: var(--accent);
+          cursor: pointer;
+          border: none;
+          box-shadow: 0 2px 6px rgba(27, 138, 111, 0.3);
+          transition: all 0.2s ease;
+        }
+        .zoom-slider::-moz-range-thumb:hover {
+          background: #157056;
+          box-shadow: 0 2px 8px rgba(27, 138, 111, 0.4);
+        }
+
+        .cover-modal-footer {
+          padding: 1rem 1.25rem;
+          border-top: 1px solid var(--border);
+          display: flex;
+          gap: 0.75rem;
+          justify-content: flex-end;
+          flex-shrink: 0;
+        }
+        .modal-btn {
+          padding: 0.6rem 1.25rem;
+          border-radius: 8px;
+          border: none;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          font-size: 0.95rem;
+          letter-spacing: 0.02em;
+        }
+        .modal-btn-primary {
+          background: var(--accent);
+          color: white;
+        }
+        .modal-btn-primary:hover {
+          background: #157056;
+          transform: translateY(-1px);
+          box-shadow: 0 2px 8px rgba(27, 138, 111, 0.3);
+        }
+        .modal-btn-secondary {
+          background: var(--bg-secondary);
+          color: var(--fg);
+          border: 1px solid var(--border);
+        }
+        .modal-btn-secondary:hover {
+          background: var(--border);
+          border-color: var(--border-strong);
+        }
+
         /* ----------------------------------------------------------- mobile */
         @media (max-width: 768px) {
           .sidebar {
@@ -972,15 +1684,22 @@ export default function Home() {
             height: 100vh;
             width: 272px;
             z-index: 1000;
-            background: var(--bg);
             box-shadow: var(--shadow-deep);
           }
           .sidebar.closed { display: none; }
-          .topbar { padding: 0.9rem 1rem 0.9rem 3.4rem; }
           .messages-inner { padding: 1.25rem 1rem; }
           .message.user .message-content { max-width: 88%; }
           .composer { padding: 0.6rem 1rem 1rem; }
           .graph-modal { width: 95%; height: 70vh; }
+          .cover-header { height: 160px; }
+          .cover-placeholder { height: 160px; }
+          .cropper-container { height: 220px; }
+          .cover-modal {
+            left: 1rem;
+            right: 1rem;
+            width: auto;
+            max-width: none;
+          }
         }
       `}</style>
     </>

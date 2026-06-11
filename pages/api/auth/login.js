@@ -35,7 +35,7 @@ async function handler(req, res) {
     return res.status(403).json({ error: 'Invalid credentials' });
   }
 
-  if (process.env.ACCESS_KEY && !safeEqual(accessKey || '', process.env.ACCESS_KEY)) {
+  if (!process.env.ACCESS_KEY || !safeEqual(accessKey || '', process.env.ACCESS_KEY)) {
     logSecurityEvent('LOGIN_FAILED', email.slice(0, 60), 'wrong access key');
     return res.status(403).json({ error: 'Invalid credentials' });
   }

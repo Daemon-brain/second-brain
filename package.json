@@ -16,7 +16,8 @@
     "jsonwebtoken": "^9.0.2",
     "next": "^15.5.19",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-force-graph": "^1.48.2"
   },
   "overrides": {
     "postcss": "^8.5.10"

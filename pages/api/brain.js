@@ -139,14 +139,24 @@ async function handler(req, res) {
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const conversation = [{ role: 'system', content: SYSTEM_PROMPT }, ...clean];
 
-  const createCompletion = (withTools, extraMessages = []) =>
-    groq.chat.completions.create({
-      model: GROQ_MODEL,
-      max_tokens: 2048,
-      temperature: 0.3,
-      messages: [...conversation, ...extraMessages],
-      ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
-    });
+  // Groq free tier allows 12k tokens/min; a multi-round agentic loop can
+  // exceed that mid-request. Brief backoff on 429 usually rides it out.
+  const createCompletion = async (withTools, extraMessages = []) => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await groq.chat.completions.create({
+          model: GROQ_MODEL,
+          max_tokens: 2048,
+          temperature: 0.3,
+          messages: [...conversation, ...extraMessages],
+          ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
+        });
+      } catch (err) {
+        if (err?.status !== 429 || attempt >= 2) throw err;
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 2500 : 6000));
+      }
+    }
+  };
 
   // Llama on Groq sometimes emits a malformed tool call and the API rejects
   // it with 400 tool_use_failed. Retry once with tools, then fall back to a
@@ -201,9 +211,19 @@ async function handler(req, res) {
       }
 
       if (round === MAX_TOOL_ROUNDS) {
+        // Tool budget exhausted, but the work may well have succeeded (e.g.
+        // the model looped re-doing a write that already worked). Drop the
+        // unexecuted trailing tool call and ask for a plain-prose summary of
+        // what was actually done instead of reporting a failure.
         logSecurityEvent('QUERY_TOOL_LIMIT', req.user.email);
+        conversation.pop();
+        const summary = await createCompletion(false, [{
+          role: 'system',
+          content: 'The tool budget for this reply is used up. Based on the tool results above, tell the user in 1-3 sentences what was actually accomplished (files created or updated, with their paths) and what, if anything, remains undone. Plain prose only.',
+        }]).catch(() => null);
         return res.status(200).json({
-          response: 'That request needed too many vault operations. Try narrowing it down.',
+          response: summary?.choices[0]?.message?.content ||
+            'That request needed too many vault operations. Try narrowing it down.',
           messages: clean,
         });
       }
@@ -234,7 +254,7 @@ async function handler(req, res) {
     }
   } catch (error) {
     if (error?.status === 429) {
-      logSecurityEvent('GROQ_RATE_LIMITED', 'system');
+      logSecurityEvent('GROQ_RATE_LIMITED', 'system', error.message);
       return res.status(503).json({ error: 'Service temporarily unavailable, try again in a minute' });
     }
     if (error?.status === 401) {
@@ -252,4 +272,6 @@ export default withSecurity(handler); // requireAuth: true (default)
 
 export const config = {
   api: { bodyParser: { sizeLimit: '1mb' } },
+  // Vercel Hobby defaults to 10s; agentic loops with 429 backoff need more
+  maxDuration: 60,
 };

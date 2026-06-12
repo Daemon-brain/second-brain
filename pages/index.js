@@ -78,6 +78,12 @@ const GlyphSearch = () => (
     <path d="M10.5 10.5L14 14" />
   </Icon>
 );
+const GlyphSync = () => (
+  <Icon>
+    <path d="M13.5 8a5.5 5.5 0 01-9.4 3.9M2.5 8a5.5 5.5 0 019.4-3.9" />
+    <path d="M12.2 1.8v2.5h-2.5M3.8 14.2v-2.5h2.5" />
+  </Icon>
+);
 const GlyphCompose = () => (
   <Icon>
     <path d="M11.3 2.7a1.4 1.4 0 012 2L6.5 11.5l-3 1 1-3z" />
@@ -364,6 +370,8 @@ export default function Home() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [graphLoading, setGraphLoading] = useState(false);
   const [coverModalOpen, setCoverModalOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState(null); // { ok, text }
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -554,6 +562,39 @@ export default function Home() {
     inputRef.current?.focus();
   }
 
+  async function handleSync() {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncStatus(null);
+    try {
+      const res = await fetch('/api/sync', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSyncStatus({ ok: false, text: data.error || 'Sync failed' });
+        return;
+      }
+      const ago = data.date ? relativeTime(new Date(data.date)) : 'unknown';
+      setSyncStatus({ ok: true, text: `Vault up to date · last change ${ago}` });
+    } catch {
+      setSyncStatus({ ok: false, text: 'Sync failed. Check your connection.' });
+    } finally {
+      setSyncing(false);
+      setTimeout(() => setSyncStatus(null), 6000);
+    }
+  }
+
+  function relativeTime(date) {
+    const sec = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min} min ago`;
+    const h = Math.floor(min / 60);
+    if (h < 24) return `${h}h ago`;
+    return `${Math.floor(h / 24)}d ago`;
+  }
+
   async function loadGraph() {
     setGraphLoading(true);
     try {
@@ -702,6 +743,13 @@ export default function Home() {
           <div className="main-column">
           <div className="page-header">
             <div className="page-header-inner">
+              {syncStatus && (
+                <span className={`sync-status ${syncStatus.ok ? 'ok' : 'err'}`}>{syncStatus.text}</span>
+              )}
+              <button onClick={handleSync} className="sync-btn" disabled={syncing} aria-label="Sync vault">
+                <span className={syncing ? 'sync-spin' : ''}><GlyphSync /></span>
+                <span>{syncing ? 'Syncing…' : 'Sync'}</span>
+              </button>
               <button onClick={() => setCoverModalOpen(true)} className="add-cover-btn">
                 <span>+ Add cover</span>
               </button>
@@ -1264,6 +1312,8 @@ export default function Home() {
           padding: 0 1.5rem;
           display: flex;
           justify-content: flex-end;
+          align-items: center;
+          gap: 0.75rem;
         }
 
         .header-brand {
@@ -1278,6 +1328,51 @@ export default function Home() {
         .header-brand :global(svg) {
           color: var(--accent);
         }
+
+        .sync-btn {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          padding: 0.65rem 1.25rem;
+          background: var(--bg-secondary);
+          color: var(--fg);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.9rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+          letter-spacing: 0.02em;
+        }
+        .sync-btn:hover:not(:disabled) {
+          background: var(--border);
+          border-color: var(--border-strong);
+          color: var(--accent);
+        }
+        .sync-btn:disabled {
+          opacity: 0.7;
+          cursor: default;
+        }
+        .sync-btn span {
+          display: flex;
+          align-items: center;
+        }
+        .sync-spin {
+          animation: sync-rotate 0.9s linear infinite;
+        }
+        @keyframes sync-rotate {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        .sync-status {
+          font-size: 0.85rem;
+          color: var(--muted);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .sync-status.ok { color: var(--accent); }
+        .sync-status.err { color: var(--danger); }
 
         .add-cover-btn {
           padding: 0.65rem 1.25rem;

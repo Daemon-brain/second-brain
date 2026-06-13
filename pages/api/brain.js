@@ -146,14 +146,19 @@ async function handler(req, res) {
       try {
         return await groq.chat.completions.create({
           model: GROQ_MODEL,
-          max_tokens: 2048,
+          // Groq's TPM pre-check reserves prompt+max_tokens against the
+          // 12k/min budget; keep the reservation small so multi-round
+          // loops fit. 1024 is plenty for a note or an answer.
+          max_tokens: 1024,
           temperature: 0.3,
           messages: [...conversation, ...extraMessages],
           ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
         });
       } catch (err) {
         if (err?.status !== 429 || attempt >= 2) throw err;
-        await new Promise((r) => setTimeout(r, attempt === 0 ? 2500 : 6000));
+        // Second wait must reach the NEXT minute window or it will just
+        // re-fail inside the same exhausted one.
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 5000 : 25000));
       }
     }
   };

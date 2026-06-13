@@ -84,6 +84,13 @@ const GlyphSync = () => (
     <path d="M12.2 1.8v2.5h-2.5M3.8 14.2v-2.5h2.5" />
   </Icon>
 );
+const GlyphSchema = () => (
+  <Icon>
+    <path d="M4 1.8h5l3 3v9.4H4z" />
+    <path d="M8.8 1.8v3.2H12" />
+    <path d="M6 8h4M6 10.5h4" />
+  </Icon>
+);
 const GlyphCompose = () => (
   <Icon>
     <path d="M11.3 2.7a1.4 1.4 0 012 2L6.5 11.5l-3 1 1-3z" />
@@ -372,6 +379,11 @@ export default function Home() {
   const [coverModalOpen, setCoverModalOpen] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncStatus, setSyncStatus] = useState(null); // { ok, text }
+  const [schemaOpen, setSchemaOpen] = useState(false);
+  const [schemaContent, setSchemaContent] = useState('');
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [schemaSaving, setSchemaSaving] = useState(false);
+  const [schemaError, setSchemaError] = useState('');
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -585,6 +597,53 @@ export default function Home() {
     }
   }
 
+  async function openSchemaEditor() {
+    setSchemaOpen(true);
+    setSchemaError('');
+    setSchemaLoading(true);
+    try {
+      const res = await fetch('/api/schema', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSchemaError(data.error || 'Could not load the schema.');
+        return;
+      }
+      setSchemaContent(data.content || '');
+    } catch {
+      setSchemaError('Could not load the schema. Check your connection.');
+    } finally {
+      setSchemaLoading(false);
+    }
+  }
+
+  async function saveSchema() {
+    if (schemaSaving || !schemaContent.trim()) return;
+    setSchemaSaving(true);
+    setSchemaError('');
+    try {
+      const res = await fetch('/api/schema', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ content: schemaContent, message: 'Edit vault schema (CLAUDE.md) from Daemon' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSchemaError(data.error || 'Could not save the schema.');
+        return;
+      }
+      setSchemaOpen(false);
+    } catch {
+      setSchemaError('Could not save the schema. Check your connection.');
+    } finally {
+      setSchemaSaving(false);
+    }
+  }
+
   function relativeTime(date) {
     const sec = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
     if (sec < 60) return 'just now';
@@ -750,6 +809,10 @@ export default function Home() {
                 <span className={syncing ? 'sync-spin' : ''}><GlyphSync /></span>
                 <span>{syncing ? 'Syncing…' : 'Sync'}</span>
               </button>
+              <button onClick={openSchemaEditor} className="sync-btn" aria-label="Edit vault schema">
+                <span><GlyphSchema /></span>
+                <span>Schema</span>
+              </button>
               <button onClick={() => setCoverModalOpen(true)} className="add-cover-btn">
                 <span>+ Add cover</span>
               </button>
@@ -837,6 +900,45 @@ export default function Home() {
                   ) : (
                     <div className="graph-empty">No notes yet. Connections appear as your vault grows.</div>
                   )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Schema Editor Modal */}
+          {schemaOpen && (
+            <div className="schema-modal-overlay" onClick={() => !schemaSaving && setSchemaOpen(false)}>
+              <div className="schema-modal" onClick={(e) => e.stopPropagation()}>
+                <div className="schema-modal-header">
+                  <div>
+                    <h2>Vault schema</h2>
+                    <p className="schema-sub">CLAUDE.md — edit it directly if Daemon&rsquo;s automatic update isn&rsquo;t right.</p>
+                  </div>
+                  <button className="modal-close-btn" onClick={() => !schemaSaving && setSchemaOpen(false)} aria-label="Close">
+                    <GlyphClose />
+                  </button>
+                </div>
+                <div className="schema-modal-body">
+                  {schemaLoading ? (
+                    <div className="schema-loading">Loading schema…</div>
+                  ) : (
+                    <textarea
+                      className="schema-textarea"
+                      value={schemaContent}
+                      onChange={(e) => setSchemaContent(e.target.value)}
+                      spellCheck={false}
+                      placeholder="# Vault Schema…"
+                    />
+                  )}
+                  {schemaError && <div className="schema-error">{schemaError}</div>}
+                </div>
+                <div className="schema-modal-footer">
+                  <button className="schema-cancel" onClick={() => setSchemaOpen(false)} disabled={schemaSaving}>
+                    Cancel
+                  </button>
+                  <button className="schema-save" onClick={saveSchema} disabled={schemaSaving || schemaLoading || !schemaContent.trim()}>
+                    {schemaSaving ? 'Saving…' : 'Save schema'}
+                  </button>
                 </div>
               </div>
             </div>
@@ -1466,6 +1568,124 @@ export default function Home() {
         }
 
         /* Cover popup: anchored under the "+ Add cover" button in the header */
+        /* ---------------------------------------------------- schema editor */
+        .schema-modal-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.4);
+          z-index: 2100;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 2rem;
+        }
+        .schema-modal {
+          width: 100%;
+          max-width: 820px;
+          max-height: 86vh;
+          background: var(--bg);
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
+          display: flex;
+          flex-direction: column;
+          animation: cover-pop 0.16s ease;
+        }
+        .schema-modal-header {
+          padding: 1.1rem 1.4rem;
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 1rem;
+          flex-shrink: 0;
+        }
+        .schema-modal-header h2 {
+          margin: 0;
+          font-size: 1.1rem;
+          color: var(--fg-strong);
+        }
+        .schema-sub {
+          margin: 0.25rem 0 0;
+          font-size: 0.82rem;
+          color: var(--muted);
+        }
+        .schema-modal-body {
+          padding: 1.1rem 1.4rem;
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 0.75rem;
+        }
+        .schema-textarea {
+          width: 100%;
+          flex: 1;
+          min-height: 360px;
+          resize: vertical;
+          background: var(--bg-secondary);
+          color: var(--fg);
+          border: 1px solid var(--border);
+          border-radius: 8px;
+          padding: 1rem;
+          font-family: var(--monospace, ui-monospace, SFMono-Regular, Menlo, monospace);
+          font-size: 0.85rem;
+          line-height: 1.55;
+          tab-size: 2;
+        }
+        .schema-textarea:focus {
+          outline: none;
+          border-color: var(--border-strong);
+        }
+        .schema-loading {
+          padding: 3rem 0;
+          text-align: center;
+          color: var(--muted);
+        }
+        .schema-error {
+          color: var(--danger);
+          font-size: 0.85rem;
+        }
+        .schema-modal-footer {
+          padding: 1rem 1.4rem;
+          border-top: 1px solid var(--border);
+          display: flex;
+          justify-content: flex-end;
+          gap: 0.75rem;
+          flex-shrink: 0;
+        }
+        .schema-cancel,
+        .schema-save {
+          padding: 0.6rem 1.3rem;
+          border-radius: 8px;
+          font-weight: 600;
+          font-size: 0.9rem;
+          cursor: pointer;
+          transition: all 0.2s ease;
+        }
+        .schema-cancel {
+          background: var(--bg-secondary);
+          color: var(--fg);
+          border: 1px solid var(--border);
+        }
+        .schema-cancel:hover:not(:disabled) {
+          background: var(--border);
+        }
+        .schema-save {
+          background: var(--accent);
+          color: #fff;
+          border: 1px solid var(--accent);
+        }
+        .schema-save:hover:not(:disabled) {
+          background: var(--accent-dark);
+          border-color: var(--accent-dark);
+        }
+        .schema-cancel:disabled,
+        .schema-save:disabled {
+          opacity: 0.6;
+          cursor: default;
+        }
+
         .cover-modal-overlay {
           position: fixed;
           inset: 0;

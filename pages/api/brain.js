@@ -193,13 +193,18 @@ async function handler(req, res) {
       if (!message) throw new Error('Empty completion from Groq');
       conversation.push(message);
 
-      // Llama occasionally writes a pseudo tool call as plain text instead
-      // of a real one ("<function=search_files...>"). Never show that to the
-      // user; tell the model to correct itself and run another round.
-      if (!message.tool_calls?.length && /<function[=\s]/.test(message.content || '') && round < MAX_TOOL_ROUNDS) {
+      // Llama frequently FAKES tool calls as plain text instead of making a
+      // real one, in two forms: the "<function=...>" syntax, and markdown
+      // like `read_file("CLAUDE.md")` or ```write_file(...)```. Either way
+      // nothing executed, so never show it to the user — tell the model to
+      // correct itself and run another round.
+      const fakesToolCall =
+        /<function[=\s]/.test(message.content || '') ||
+        /(?:read_file|write_file|search_files|list_files)\s*\(/.test(message.content || '');
+      if (!message.tool_calls?.length && fakesToolCall && round < MAX_TOOL_ROUNDS) {
         conversation.push({
           role: 'system',
-          content: 'Your previous reply contained a malformed tool call and nothing was executed. Either make a valid tool call, or answer the user in plain prose without pretending to search.',
+          content: 'STOP. Your last reply only TALKED about calling tools (e.g. wrote read_file(...) as text or in a code block). That executes NOTHING. You must invoke the tools through the real function-calling interface, not by writing their names in your message. Now actually call the needed tool. If you do not need any tool, answer the user in plain prose and never mention tool names or pretend to have run them.',
         });
         continue;
       }

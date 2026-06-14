@@ -215,7 +215,9 @@ async function handler(req, res) {
       // a note was added) without ever calling write_file — a hallucinated save.
       // If it used that format but no write actually ran, make it do the work.
       const claimsSaveFormat =
-        /knowledge note/i.test(content) || /###\s*\d\.\s*classification/i.test(content);
+        /knowledge note/i.test(content) ||
+        /###\s*\d\.\s*classification/i.test(content) ||
+        (/compressed insight/i.test(content) && /key principles/i.test(content));
       if (!message.tool_calls?.length && claimsSaveFormat && !wroteFile && round < MAX_TOOL_ROUNDS) {
         conversation.push({
           role: 'system',

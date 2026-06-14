@@ -384,9 +384,41 @@ export default function Home() {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaSaving, setSchemaSaving] = useState(false);
   const [schemaError, setSchemaError] = useState('');
+  const [groqUsed, setGroqUsed] = useState(0); // tokens used today (this browser)
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
+
+  // Daily Groq token budget on the free tier. The web app counts tokens it
+  // spends (per UTC day, in localStorage) since Groq exposes no daily total;
+  // a 429 with the real "Used X" self-corrects this estimate.
+  const GROQ_DAILY_LIMIT = 100000;
+  const todayKey = () => new Date().toISOString().slice(0, 10); // UTC date
+
+  // Load today's tally on mount (reset if the stored date is stale).
+  useEffect(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem('groqUsage') || '{}');
+      setGroqUsed(raw.date === todayKey() ? raw.used || 0 : 0);
+    } catch {
+      setGroqUsed(0);
+    }
+  }, []);
+
+  // Add this request's tokens to the running daily tally; if Groq reported the
+  // true daily figure (on a 429), snap to that exact number instead.
+  function recordGroqUsage({ tokensUsed, dailyUsed }) {
+    setGroqUsed((prev) => {
+      const stale = (() => {
+        try { return JSON.parse(localStorage.getItem('groqUsage') || '{}').date !== todayKey(); }
+        catch { return true; }
+      })();
+      const base = stale ? 0 : prev;
+      const next = Number.isFinite(dailyUsed) ? dailyUsed : base + (tokensUsed || 0);
+      try { localStorage.setItem('groqUsage', JSON.stringify({ date: todayKey(), used: next })); } catch {}
+      return next;
+    });
+  }
 
   // Get current chat
   const currentChat = chats.find((c) => c.id === currentChatId);
@@ -559,6 +591,7 @@ export default function Home() {
       }
 
       const data = await res.json().catch(() => ({}));
+      recordGroqUsage({ tokensUsed: data.tokensUsed, dailyUsed: data.dailyUsed });
       const reply = res.ok ? data.response : data.error || 'Error communicating with vault.';
       updateChatMessages([...nextMessages, { role: 'assistant', content: reply }]);
     } catch {
@@ -802,6 +835,18 @@ export default function Home() {
           <div className="main-column">
           <div className="page-header">
             <div className="page-header-inner">
+              {(() => {
+                const frac = Math.min(groqUsed / GROQ_DAILY_LIMIT, 1);
+                const level = frac >= 0.9 ? 'crit' : frac >= 0.6 ? 'warn' : 'ok';
+                const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+                return (
+                  <div className={`usage-meter ${level}`} title={`AI usage today: ${groqUsed.toLocaleString()} / ${GROQ_DAILY_LIMIT.toLocaleString()} tokens (counts this app's web usage; resets daily)`}>
+                    <span className="usage-label">AI today</span>
+                    <span className="usage-track"><span className="usage-fill" style={{ width: `${frac * 100}%` }} /></span>
+                    <span className="usage-num">{fmt(groqUsed)}/{fmt(GROQ_DAILY_LIMIT)}</span>
+                  </div>
+                );
+              })()}
               {syncStatus && (
                 <span className={`sync-status ${syncStatus.ok ? 'ok' : 'err'}`}>{syncStatus.text}</span>
               )}
@@ -1416,6 +1461,50 @@ export default function Home() {
           justify-content: flex-end;
           align-items: center;
           gap: 0.75rem;
+        }
+
+        /* Groq daily-usage meter — sits on the LEFT, pushes buttons right. */
+        .usage-meter {
+          margin-right: auto;
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          font-size: 0.72rem;
+          color: var(--fg-muted, #888);
+          user-select: none;
+        }
+        .usage-label {
+          font-weight: 600;
+          letter-spacing: 0.02em;
+          text-transform: uppercase;
+          font-size: 0.62rem;
+          opacity: 0.8;
+        }
+        .usage-track {
+          width: 96px;
+          height: 6px;
+          border-radius: 999px;
+          background: var(--border, #e3e3e0);
+          overflow: hidden;
+        }
+        .usage-fill {
+          display: block;
+          height: 100%;
+          border-radius: 999px;
+          background: #1B8A6F;
+          transition: width 0.4s ease;
+        }
+        .usage-meter.warn .usage-fill { background: #C9821A; }
+        .usage-meter.crit .usage-fill { background: #C0392B; }
+        .usage-num {
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+          opacity: 0.85;
+        }
+        .usage-meter.crit .usage-num { color: #C0392B; font-weight: 600; }
+        @media (max-width: 640px) {
+          .usage-label { display: none; }
+          .usage-track { width: 60px; }
         }
 
         .header-brand {

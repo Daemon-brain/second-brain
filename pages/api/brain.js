@@ -141,10 +141,11 @@ async function handler(req, res) {
 
   // Groq free tier allows 12k tokens/min; a multi-round agentic loop can
   // exceed that mid-request. Brief backoff on 429 usually rides it out.
+  let tokensUsed = 0; // total tokens this request spent (for the usage bar)
   const createCompletion = async (withTools, extraMessages = []) => {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await groq.chat.completions.create({
+        const completion = await groq.chat.completions.create({
           model: GROQ_MODEL,
           // Groq's TPM pre-check reserves prompt+max_tokens against the
           // 12k/min budget; keep the reservation small so multi-round
@@ -154,6 +155,8 @@ async function handler(req, res) {
           messages: [...conversation, ...extraMessages],
           ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
         });
+        tokensUsed += completion.usage?.total_tokens || 0;
+        return completion;
       } catch (err) {
         if (err?.status !== 429 || attempt >= 2) throw err;
         // Second wait must reach the NEXT minute window or it will just
@@ -230,6 +233,7 @@ async function handler(req, res) {
         logSecurityEvent('QUERY_SUCCESS', req.user.email, `${round} tool round(s)`);
         return res.status(200).json({
           response: message.content || 'Done.',
+          tokensUsed,
           // Return only the visible turns; never echo the system prompt
           messages: conversation
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content)
@@ -251,6 +255,7 @@ async function handler(req, res) {
         return res.status(200).json({
           response: summary?.choices[0]?.message?.content ||
             'That request needed too many vault operations. Try narrowing it down.',
+          tokensUsed,
           messages: clean,
         });
       }
@@ -285,7 +290,18 @@ async function handler(req, res) {
   } catch (error) {
     if (error?.status === 429) {
       logSecurityEvent('GROQ_RATE_LIMITED', 'system', error.message);
-      return res.status(503).json({ error: 'Service temporarily unavailable, try again in a minute' });
+      // When it's the DAILY (TPD) cap, Groq states the real numbers in the
+      // message — surface them so the usage bar can show the true daily total.
+      const haystack = [
+        error?.message,
+        error?.error?.message,
+        error?.error?.error?.message,
+      ].filter(Boolean).join(' ');
+      const tpd = /tokens per day \(TPD\): Limit (\d+), Used (\d+)/.exec(haystack);
+      return res.status(503).json({
+        error: 'Service temporarily unavailable, try again in a minute',
+        ...(tpd ? { dailyLimit: Number(tpd[1]), dailyUsed: Number(tpd[2]) } : {}),
+      });
     }
     if (error?.status === 401) {
       // Invalid Groq API key - configuration problem, not a user problem

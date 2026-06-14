@@ -171,6 +171,7 @@ async function handler(req, res) {
     (err?.error?.error?.code === 'tool_use_failed' || String(err?.message || '').includes('tool_use_failed'));
 
   try {
+    let wroteFile = false; // did a real write_file actually succeed this request?
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
       let completion;
       try {
@@ -206,6 +207,19 @@ async function handler(req, res) {
         conversation.push({
           role: 'system',
           content: 'STOP. Your last reply only TALKED about calling tools (e.g. wrote read_file(...) as text or in a code block). That executes NOTHING. You must invoke the tools through the real function-calling interface, not by writing their names in your message. Now actually call the needed tool. If you do not need any tool, answer the user in plain prose and never mention tool names or pretend to have run them.',
+        });
+        continue;
+      }
+
+      // The model sometimes emits the architect "I saved it" format (or claims
+      // a note was added) without ever calling write_file — a hallucinated save.
+      // If it used that format but no write actually ran, make it do the work.
+      const claimsSaveFormat =
+        /knowledge note/i.test(content) || /###\s*\d\.\s*classification/i.test(content);
+      if (!message.tool_calls?.length && claimsSaveFormat && !wroteFile && round < MAX_TOOL_ROUNDS) {
+        conversation.push({
+          role: 'system',
+          content: 'You presented a note in the architect format but never actually called write_file, so NOTHING was saved to the vault. Make the real write_file function call now, with the note path and the full content INCLUDING the YAML frontmatter tags. Only after a write_file call has succeeded may you report the note as saved.',
         });
         continue;
       }
@@ -255,6 +269,9 @@ async function handler(req, res) {
         } catch (toolError) {
           logSecurityEvent('TOOL_FAILED', req.user?.email || 'unknown', `${toolCall.function.name}: ${toolError.message}`);
           result = `Error: the "${toolCall.function.name}" vault operation failed (${toolError.status === 404 ? 'not found' : 'vault unavailable'}). Tell the user briefly, and answer from your own knowledge if you can.`;
+        }
+        if (toolCall.function.name === 'write_file' && typeof result === 'string' && result.startsWith('File saved')) {
+          wroteFile = true;
         }
         conversation.push({
           role: 'tool',

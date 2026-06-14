@@ -194,13 +194,14 @@ async function handler(req, res) {
       conversation.push(message);
 
       // Llama frequently FAKES tool calls as plain text instead of making a
-      // real one, in two forms: the "<function=...>" syntax, and markdown
-      // like `read_file("CLAUDE.md")` or ```write_file(...)```. Either way
-      // nothing executed, so never show it to the user — tell the model to
-      // correct itself and run another round.
+      // real one. Observed forms: "<function=name ...>", "<function(name>...",
+      // "</function>", and markdown like `read_file("x")` or ```write_file(...)```.
+      // Either way nothing executed, so never show it to the user — tell the
+      // model to correct itself and run another round.
+      const content = message.content || '';
       const fakesToolCall =
-        /<function[=\s]/.test(message.content || '') ||
-        /(?:read_file|write_file|search_files|list_files)\s*\(/.test(message.content || '');
+        /<\/?function[=\s(>]/.test(content) ||
+        /(?:read_file|write_file|search_files|list_files)\s*[("'>]/.test(content);
       if (!message.tool_calls?.length && fakesToolCall && round < MAX_TOOL_ROUNDS) {
         conversation.push({
           role: 'system',

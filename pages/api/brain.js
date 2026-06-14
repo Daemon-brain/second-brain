@@ -148,8 +148,8 @@ async function handler(req, res) {
           model: GROQ_MODEL,
           // Groq's TPM pre-check reserves prompt+max_tokens against the
           // 12k/min budget; keep the reservation small so multi-round
-          // loops fit. 1024 is plenty for a note or an answer.
-          max_tokens: 1024,
+          // loops fit. 768 is plenty for a note or an answer.
+          max_tokens: 768,
           temperature: 0.3,
           messages: [...conversation, ...extraMessages],
           ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),

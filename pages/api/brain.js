@@ -158,10 +158,11 @@ async function handler(req, res) {
         tokensUsed += completion.usage?.total_tokens || 0;
         return completion;
       } catch (err) {
-        if (err?.status !== 429 || attempt >= 2) throw err;
-        // Second wait must reach the NEXT minute window or it will just
-        // re-fail inside the same exhausted one.
-        await new Promise((r) => setTimeout(r, attempt === 0 ? 5000 : 25000));
+        if (err?.status !== 429 || attempt >= 1) throw err;
+        // One short backoff only: a long wait risks blowing Vercel's 60s
+        // function limit (which surfaces to the user as a 504). Fail fast to
+        // a clean "try again" instead of a timeout.
+        await new Promise((r) => setTimeout(r, 4000));
       }
     }
   };
@@ -175,7 +176,20 @@ async function handler(req, res) {
 
   try {
     let wroteFile = false; // did a real write_file actually succeed this request?
+    // Vercel hobby kills the function at 60s (surfaces as a 504 "Error
+    // communicating with vault"). Stop starting new rounds past this deadline
+    // and return what we have instead — saved work is reported honestly.
+    const deadline = Date.now() + 50000;
     for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
+      if (Date.now() > deadline) {
+        logSecurityEvent('QUERY_DEADLINE', req.user.email, `${round} round(s)`);
+        return res.status(200).json({
+          response: wroteFile
+            ? 'Saved to your vault. (I ran out of time to write the full report, but the note is in.)'
+            : "That request is taking too long on the free tier — nothing was saved. Please try again, or split it into a smaller step.",
+          tokensUsed,
+        });
+      }
       let completion;
       try {
         completion = await createCompletion(true);
@@ -230,6 +244,16 @@ async function handler(req, res) {
       }
 
       if (!message.tool_calls?.length) {
+        // Last-round safety net: if the model produced the "I saved it" format
+        // but never actually wrote (the re-prompt above only fires while
+        // round < MAX), don't hand the user a fake success.
+        if (claimsSaveFormat && !wroteFile) {
+          logSecurityEvent('QUERY_HALLUCINATED_SAVE', req.user.email);
+          return res.status(200).json({
+            response: "I wasn't able to finish saving that to your vault (the write didn't go through). Please send it again — it usually works on a second try.",
+            tokensUsed,
+          });
+        }
         logSecurityEvent('QUERY_SUCCESS', req.user.email, `${round} tool round(s)`);
         return res.status(200).json({
           response: message.content || 'Done.',

@@ -14,12 +14,34 @@
  *   forever burning the free tier or hitting the Vercel timeout.
  */
 
-import Groq from 'groq-sdk';
 const { withSecurity, logSecurityEvent } = require('../../lib/security');
 const { SYSTEM_PROMPT } = require('../../lib/system-prompt');
 import * as vault from '../../lib/github';
 
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+// LLM providers tried in order: Groq first (fast, but only 100k tokens/day on
+// the free tier), then Cerebras as a fallback (much larger free daily budget).
+// Both speak the OpenAI chat API, so one request shape works for both. A
+// provider is enabled only if its key is set; the order here is fallback order.
+const PROVIDERS = [
+  { name: 'groq', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile' },
+  { name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: process.env.CEREBRAS_MODEL || 'llama-3.3-70b' },
+].filter((p) => p.key);
+
+async function callProvider(provider, body) {
+  const res = await fetch(provider.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${provider.key}` },
+    body: JSON.stringify({ ...body, model: provider.model }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    const err = new Error(`${provider.name} ${res.status}: ${text.slice(0, 400)}`);
+    err.status = res.status;
+    throw err;
+  }
+  return res.json();
+}
+
 const MAX_TOOL_ROUNDS = 6;
 const MAX_MESSAGES = 40;
 const MAX_CONTENT_CHARS = 8000;
@@ -127,44 +149,47 @@ async function handler(req, res) {
     return res.status(400).json({ error: 'Invalid request format' });
   }
 
-  if (
-    !process.env.GROQ_API_KEY ||
-    !process.env.GROQ_API_KEY.startsWith('gsk_') ||
-    process.env.GROQ_API_KEY.includes('YOUR_')
-  ) {
-    logSecurityEvent('GROQ_NOT_CONFIGURED', 'system');
+  if (PROVIDERS.length === 0) {
+    logSecurityEvent('LLM_NOT_CONFIGURED', 'system');
     return res.status(503).json({ error: 'Vault brain is not configured yet' });
   }
 
-  const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const conversation = [{ role: 'system', content: SYSTEM_PROMPT }, ...clean];
 
-  // Groq free tier allows 12k tokens/min; a multi-round agentic loop can
-  // exceed that mid-request. Brief backoff on 429 usually rides it out.
-  let tokensUsed = 0; // total tokens this request spent (for the usage bar)
+  let tokensUsed = 0;      // total tokens this request spent (for the usage bar)
+  let usedProvider = null; // which provider actually served the last call
+  // Try providers in order; on rate-limit (429), outage (5xx), or a botched
+  // tool call, fall straight over to the next provider instead of waiting out
+  // the limit. This is what keeps Daemon working after Groq's daily cap is hit.
   const createCompletion = async (withTools, extraMessages = []) => {
-    for (let attempt = 0; ; attempt++) {
+    const body = {
+      // keep the per-call token reservation small so multi-round loops fit
+      max_tokens: 768,
+      temperature: 0.3,
+      messages: [...conversation, ...extraMessages],
+      ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
+    };
+    let lastErr;
+    for (const provider of PROVIDERS) {
       try {
-        const completion = await groq.chat.completions.create({
-          model: GROQ_MODEL,
-          // Groq's TPM pre-check reserves prompt+max_tokens against the
-          // 12k/min budget; keep the reservation small so multi-round
-          // loops fit. 768 is plenty for a note or an answer.
-          max_tokens: 768,
-          temperature: 0.3,
-          messages: [...conversation, ...extraMessages],
-          ...(withTools ? { tools: TOOLS, tool_choice: 'auto' } : {}),
-        });
-        tokensUsed += completion.usage?.total_tokens || 0;
+        const completion = await callProvider(provider, body);
+        usedProvider = provider.name;
+        // The usage bar tracks GROQ's 100k/day cap, so only Groq tokens draw it
+        // down; tokens served by the Cerebras fallback don't count against it.
+        if (provider.name === 'groq') tokensUsed += completion.usage?.total_tokens || 0;
         return completion;
       } catch (err) {
-        if (err?.status !== 429 || attempt >= 1) throw err;
-        // One short backoff only: a long wait risks blowing Vercel's 60s
-        // function limit (which surfaces to the user as a 504). Fail fast to
-        // a clean "try again" instead of a timeout.
-        await new Promise((r) => setTimeout(r, 4000));
+        lastErr = err;
+        const rateOrDown = err.status === 429 || err.status >= 500;
+        const toolBotch = err.status === 400 && /tool_use_failed/.test(err.message || '');
+        if (rateOrDown || toolBotch) {
+          logSecurityEvent('PROVIDER_FALLBACK', 'system', `${provider.name} ${err.status} -> next`);
+          continue;
+        }
+        throw err;
       }
     }
+    throw lastErr;
   };
 
   // Llama on Groq sometimes emits a malformed tool call and the API rejects
@@ -188,6 +213,7 @@ async function handler(req, res) {
             ? 'Saved to your vault. (I ran out of time to write the full report, but the note is in.)'
             : "That request is taking too long on the free tier — nothing was saved. Please try again, or split it into a smaller step.",
           tokensUsed,
+          provider: usedProvider,
         });
       }
       let completion;
@@ -252,12 +278,14 @@ async function handler(req, res) {
           return res.status(200).json({
             response: "I wasn't able to finish saving that to your vault (the write didn't go through). Please send it again — it usually works on a second try.",
             tokensUsed,
+          provider: usedProvider,
           });
         }
         logSecurityEvent('QUERY_SUCCESS', req.user.email, `${round} tool round(s)`);
         return res.status(200).json({
           response: message.content || 'Done.',
           tokensUsed,
+          provider: usedProvider,
           // Return only the visible turns; never echo the system prompt
           messages: conversation
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content)
@@ -280,6 +308,7 @@ async function handler(req, res) {
           response: summary?.choices[0]?.message?.content ||
             'That request needed too many vault operations. Try narrowing it down.',
           tokensUsed,
+          provider: usedProvider,
           messages: clean,
         });
       }

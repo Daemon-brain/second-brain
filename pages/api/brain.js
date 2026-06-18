@@ -24,7 +24,7 @@ import * as vault from '../../lib/github';
 // provider is enabled only if its key is set; the order here is fallback order.
 const PROVIDERS = [
   { name: 'groq', url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY, model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile' },
-  { name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: process.env.CEREBRAS_MODEL || 'llama-3.3-70b' },
+  { name: 'cerebras', url: 'https://api.cerebras.ai/v1/chat/completions', key: process.env.CEREBRAS_API_KEY, model: process.env.CEREBRAS_MODEL || 'gpt-oss-120b' },
 ].filter((p) => p.key);
 
 async function callProvider(provider, body) {
@@ -179,14 +179,11 @@ async function handler(req, res) {
         if (provider.name === 'groq') tokensUsed += completion.usage?.total_tokens || 0;
         return completion;
       } catch (err) {
+        // Fall over to the next provider on ANY failure (rate limit, outage,
+        // bad tool call, misconfig). Staying up matters more than which engine
+        // served; only error out if EVERY provider fails.
         lastErr = err;
-        const rateOrDown = err.status === 429 || err.status >= 500;
-        const toolBotch = err.status === 400 && /tool_use_failed/.test(err.message || '');
-        if (rateOrDown || toolBotch) {
-          logSecurityEvent('PROVIDER_FALLBACK', 'system', `${provider.name} ${err.status} -> next`);
-          continue;
-        }
-        throw err;
+        logSecurityEvent('PROVIDER_FALLBACK', 'system', `${provider.name} ${err.status || 'ERR'} -> next: ${String(err.message).slice(0, 160)}`);
       }
     }
     throw lastErr;
@@ -233,8 +230,17 @@ async function handler(req, res) {
         }
       }
 
-      const message = completion.choices[0]?.message;
-      if (!message) throw new Error('Empty completion from Groq');
+      const raw = completion.choices[0]?.message;
+      if (!raw) throw new Error('Empty completion from provider');
+      // Keep ONLY portable OpenAI fields. Providers add their own extras (e.g.
+      // Cerebras gpt-oss returns a `reasoning` field) that a DIFFERENT provider
+      // rejects when the message is replayed on the next round. Strip them so
+      // the conversation stays valid across a Groq<->Cerebras fallback.
+      const message = {
+        role: raw.role,
+        content: raw.content ?? null,
+        ...(raw.tool_calls?.length ? { tool_calls: raw.tool_calls } : {}),
+      };
       conversation.push(message);
 
       // Llama frequently FAKES tool calls as plain text instead of making a

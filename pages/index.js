@@ -627,6 +627,7 @@ export default function Home() {
     setSyncStatus(null);
     try {
       const res = await fetch('/api/sync', {
+        method: 'POST', // POST also refreshes CLAUDE.md's live-structure block
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       const data = await res.json().catch(() => ({}));
@@ -635,7 +636,12 @@ export default function Home() {
         return;
       }
       const ago = data.date ? relativeTime(new Date(data.date)) : 'unknown';
-      setSyncStatus({ ok: true, text: `Vault up to date · last change ${ago}` });
+      setSyncStatus({
+        ok: true,
+        text: data.schemaUpdated
+          ? `Synced · schema structure updated`
+          : `Vault up to date · last change ${ago}`,
+      });
     } catch {
       setSyncStatus({ ok: false, text: 'Sync failed. Check your connection.' });
     } finally {

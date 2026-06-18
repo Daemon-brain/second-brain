@@ -384,26 +384,39 @@ export default function Home() {
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaSaving, setSchemaSaving] = useState(false);
   const [schemaError, setSchemaError] = useState('');
-  const [groqUsed, setGroqUsed] = useState(0); // tokens used today (this browser)
+  const [groqUsed, setGroqUsed] = useState(0); // Groq tokens used today (this browser)
+  const [cerebras, setCerebras] = useState({ used: 0, limit: 1000000 }); // live from Cerebras headers
 
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
-  // Daily Groq token budget on the free tier. The web app counts tokens it
-  // spends (per UTC day, in localStorage) since Groq exposes no daily total;
-  // a 429 with the real "Used X" self-corrects this estimate.
+  // Daily token budgets on the free tier. Groq hides its daily total, so the
+  // web app tallies Groq tokens per UTC day in localStorage (a 429 with the real
+  // "Used X" self-corrects it). Cerebras reports daily remaining in its response
+  // headers, so we just store the latest authoritative figure.
   const GROQ_DAILY_LIMIT = 100000;
+  const CEREBRAS_DEFAULT_LIMIT = 1000000;
   const todayKey = () => new Date().toISOString().slice(0, 10); // UTC date
 
-  // Load today's tally on mount (reset if the stored date is stale).
+  // Load today's tallies on mount (reset if the stored date is stale).
   useEffect(() => {
     try {
-      const raw = JSON.parse(localStorage.getItem('groqUsage') || '{}');
-      setGroqUsed(raw.date === todayKey() ? raw.used || 0 : 0);
-    } catch {
-      setGroqUsed(0);
-    }
+      const g = JSON.parse(localStorage.getItem('groqUsage') || '{}');
+      setGroqUsed(g.date === todayKey() ? g.used || 0 : 0);
+    } catch { setGroqUsed(0); }
+    try {
+      const c = JSON.parse(localStorage.getItem('cerebrasUsage') || '{}');
+      if (c.date === todayKey() && Number.isFinite(c.used)) setCerebras({ used: c.used, limit: c.limit || CEREBRAS_DEFAULT_LIMIT });
+    } catch { /* keep defaults */ }
   }, []);
+
+  // Store Cerebras's authoritative daily figures (absolute, from headers).
+  function recordCerebrasUsage(c) {
+    if (!c || !Number.isFinite(c.used)) return;
+    const next = { used: c.used, limit: c.limit || CEREBRAS_DEFAULT_LIMIT };
+    setCerebras(next);
+    try { localStorage.setItem('cerebrasUsage', JSON.stringify({ date: todayKey(), ...next })); } catch {}
+  }
 
   // Add this request's tokens to the running daily tally; if Groq reported the
   // true daily figure (on a 429), snap to that exact number instead.
@@ -592,6 +605,7 @@ export default function Home() {
 
       const data = await res.json().catch(() => ({}));
       recordGroqUsage({ tokensUsed: data.tokensUsed, dailyUsed: data.dailyUsed });
+      recordCerebrasUsage(data.cerebras);
       const reply = res.ok ? data.response : data.error || 'Error communicating with vault.';
       updateChatMessages([...nextMessages, { role: 'assistant', content: reply }]);
     } catch {
@@ -836,14 +850,23 @@ export default function Home() {
           <div className="page-header">
             <div className="page-header-inner">
               {(() => {
-                const frac = Math.min(groqUsed / GROQ_DAILY_LIMIT, 1);
-                const level = frac >= 0.9 ? 'crit' : frac >= 0.6 ? 'warn' : 'ok';
-                const fmt = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${n}`);
+                const totalLimit = GROQ_DAILY_LIMIT + cerebras.limit;
+                const totalUsed = Math.min(groqUsed, GROQ_DAILY_LIMIT) + Math.min(cerebras.used, cerebras.limit);
+                const frac = Math.min(totalUsed / totalLimit, 1);
+                // Run out = BOTH exhausted, so color by the combined budget.
+                const level = frac >= 0.9 ? 'crit' : frac >= 0.7 ? 'warn' : 'ok';
+                const fmt = (n) => n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : `${Math.round(n)}`;
+                const gW = (Math.min(groqUsed, GROQ_DAILY_LIMIT) / totalLimit) * 100;
+                const cW = (Math.min(cerebras.used, cerebras.limit) / totalLimit) * 100;
+                const title = `AI usage today (resets daily)\nGroq: ${Math.round(groqUsed).toLocaleString()} / ${GROQ_DAILY_LIMIT.toLocaleString()}\nCerebras: ${Math.round(cerebras.used).toLocaleString()} / ${cerebras.limit.toLocaleString()}`;
                 return (
-                  <div className={`usage-meter ${level}`} title={`AI usage today: ${groqUsed.toLocaleString()} / ${GROQ_DAILY_LIMIT.toLocaleString()} tokens (counts this app's web usage; resets daily)`}>
+                  <div className={`usage-meter ${level}`} title={title}>
                     <span className="usage-label">AI today</span>
-                    <span className="usage-track"><span className="usage-fill" style={{ width: `${frac * 100}%` }} /></span>
-                    <span className="usage-num">{fmt(groqUsed)}/{fmt(GROQ_DAILY_LIMIT)}</span>
+                    <span className="usage-track">
+                      <span className="usage-fill groq" style={{ width: `${gW}%` }} />
+                      <span className="usage-fill cerebras" style={{ width: `${cW}%` }} />
+                    </span>
+                    <span className="usage-num">{fmt(totalUsed)}/{fmt(totalLimit)}</span>
                   </div>
                 );
               })()}
@@ -1463,7 +1486,8 @@ export default function Home() {
           gap: 0.75rem;
         }
 
-        /* Groq daily-usage meter — sits on the LEFT, pushes buttons right. */
+        /* AI daily-usage meter (Groq + Cerebras) — LEFT, pushes buttons right.
+           Two segments: Groq used, then Cerebras used, over the combined budget. */
         .usage-meter {
           margin-right: auto;
           display: flex;
@@ -1481,30 +1505,29 @@ export default function Home() {
           opacity: 0.8;
         }
         .usage-track {
-          width: 96px;
+          width: 110px;
           height: 6px;
           border-radius: 999px;
           background: var(--border, #e3e3e0);
           overflow: hidden;
+          display: flex;
         }
         .usage-fill {
-          display: block;
           height: 100%;
-          border-radius: 999px;
-          background: #1B8A6F;
           transition: width 0.4s ease;
         }
-        .usage-meter.warn .usage-fill { background: #C9821A; }
-        .usage-meter.crit .usage-fill { background: #C0392B; }
+        .usage-fill.groq { background: #1B8A6F; }      /* Groq segment (green) */
+        .usage-fill.cerebras { background: #6366F1; }  /* Cerebras segment (indigo) */
         .usage-num {
           font-variant-numeric: tabular-nums;
           white-space: nowrap;
           opacity: 0.85;
         }
+        .usage-meter.warn .usage-num { color: #C9821A; font-weight: 600; }
         .usage-meter.crit .usage-num { color: #C0392B; font-weight: 600; }
         @media (max-width: 640px) {
           .usage-label { display: none; }
-          .usage-track { width: 60px; }
+          .usage-track { width: 72px; }
         }
 
         .header-brand {

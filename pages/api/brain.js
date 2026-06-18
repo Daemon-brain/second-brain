@@ -39,7 +39,7 @@ async function callProvider(provider, body) {
     err.status = res.status;
     throw err;
   }
-  return res.json();
+  return { data: await res.json(), headers: res.headers };
 }
 
 const MAX_TOOL_ROUNDS = 6;
@@ -156,8 +156,9 @@ async function handler(req, res) {
 
   const conversation = [{ role: 'system', content: SYSTEM_PROMPT }, ...clean];
 
-  let tokensUsed = 0;      // total tokens this request spent (for the usage bar)
+  let tokensUsed = 0;      // Groq tokens this request (for the Groq usage bar)
   let usedProvider = null; // which provider actually served the last call
+  let cerebrasRate = null; // { used, limit } daily, read live from Cerebras headers
   // Try providers in order; on rate-limit (429), outage (5xx), or a botched
   // tool call, fall straight over to the next provider instead of waiting out
   // the limit. This is what keeps Daemon working after Groq's daily cap is hit.
@@ -172,11 +173,18 @@ async function handler(req, res) {
     let lastErr;
     for (const provider of PROVIDERS) {
       try {
-        const completion = await callProvider(provider, body);
+        const { data: completion, headers } = await callProvider(provider, body);
         usedProvider = provider.name;
-        // The usage bar tracks GROQ's 100k/day cap, so only Groq tokens draw it
-        // down; tokens served by the Cerebras fallback don't count against it.
-        if (provider.name === 'groq') tokensUsed += completion.usage?.total_tokens || 0;
+        // Groq hides its daily budget, so the frontend tallies Groq tokens
+        // against the 100k/day cap. Cerebras EXPOSES daily remaining in headers,
+        // so read it straight off the response (authoritative, no tallying).
+        if (provider.name === 'groq') {
+          tokensUsed += completion.usage?.total_tokens || 0;
+        } else if (provider.name === 'cerebras') {
+          const rem = Number(headers.get('x-ratelimit-remaining-tokens-day'));
+          const lim = Number(headers.get('x-ratelimit-limit-tokens-day'));
+          if (Number.isFinite(rem) && Number.isFinite(lim)) cerebrasRate = { used: lim - rem, limit: lim };
+        }
         return completion;
       } catch (err) {
         // Fall over to the next provider on ANY failure (rate limit, outage,
@@ -211,6 +219,7 @@ async function handler(req, res) {
             : "That request is taking too long on the free tier — nothing was saved. Please try again, or split it into a smaller step.",
           tokensUsed,
           provider: usedProvider,
+          cerebras: cerebrasRate,
         });
       }
       let completion;
@@ -285,6 +294,7 @@ async function handler(req, res) {
             response: "I wasn't able to finish saving that to your vault (the write didn't go through). Please send it again — it usually works on a second try.",
             tokensUsed,
           provider: usedProvider,
+          cerebras: cerebrasRate,
           });
         }
         logSecurityEvent('QUERY_SUCCESS', req.user.email, `${round} tool round(s)`);
@@ -292,6 +302,7 @@ async function handler(req, res) {
           response: message.content || 'Done.',
           tokensUsed,
           provider: usedProvider,
+          cerebras: cerebrasRate,
           // Return only the visible turns; never echo the system prompt
           messages: conversation
             .filter((m) => (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content)
@@ -315,6 +326,7 @@ async function handler(req, res) {
             'That request needed too many vault operations. Try narrowing it down.',
           tokensUsed,
           provider: usedProvider,
+          cerebras: cerebrasRate,
           messages: clean,
         });
       }
